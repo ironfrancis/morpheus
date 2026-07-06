@@ -1,393 +1,339 @@
 import { useState, useEffect } from 'react';
-import { parseMorpheusMarkdown, DEFAULT_MARKDOWN_TEMPLATE } from './utils/parser';
-import type { ParsedData } from './types';
-import { TimelineView } from './components/TimelineView';
-import { BoardView } from './components/BoardView';
-import { SimpleForceGraph } from './components/SimpleForceGraph';
-import { PresetTemplates } from './components/PresetTemplates';
-import { ShareModal } from './components/ShareModal';
-import { 
-  Sparkles, 
-  Moon, 
-  Sun, 
-  Milestone, 
-  Kanban, 
-  Network, 
-  Share, 
-  Edit3, 
-  HelpCircle
-} from 'lucide-react';
+import { KanbanBoard } from './components/KanbanBoard';
+import { RelationshipGraph } from './components/RelationshipGraph';
+import { NoteEditor } from './components/NoteEditor';
+import { MorpheusAssistant } from './components/MorpheusAssistant';
+import { ImportExport } from './components/ImportExport';
+import { Note, buildNoteLibrary, updateNoteFrontmatter } from './utils/markdown';
+import { initialNotes } from './utils/initialData';
+import { LayoutDashboard, Network, Moon, Sun, Plus, Search, HelpCircle, Bot } from 'lucide-react';
 
-export default function App() {
-  const [markdown, setMarkdown] = useState(DEFAULT_MARKDOWN_TEMPLATE);
-  const [parsedData, setParsedData] = useState<ParsedData>(() => parseMorpheusMarkdown(DEFAULT_MARKDOWN_TEMPLATE));
-  const [activeTab, setActiveTab] = useState<'timeline' | 'board' | 'graph'>('timeline');
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
-  const [isShareOpen, setIsShareOpen] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
+type ViewMode = 'kanban' | 'graph';
 
-  // Initialize Theme and check Share URL query on mount
+function App() {
+  const [notes, setNotes] = useState<Record<string, Note>>({});
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>('kanban');
+  const [darkMode, setDarkMode] = useState<boolean>(true);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [showAssistant, setShowAssistant] = useState<boolean>(true);
+
+  // 初始化数据
   useEffect(() => {
-    // 1. Theme configuration
-    const isDarkTheme = localStorage.getItem('theme') !== 'light';
-    setTheme(isDarkTheme ? 'dark' : 'light');
-    document.documentElement.classList.toggle('dark', isDarkTheme);
-
-    // 2. Read state from URL query
-    const params = new URLSearchParams(window.location.search);
-    const compressedData = params.get('data');
-    if (compressedData) {
-      try {
-        const decoded = decodeURIComponent(atob(compressedData));
-        if (decoded && decoded.trim().startsWith('#')) {
-          setMarkdown(decoded);
-          setParsedData(parseMorpheusMarkdown(decoded));
-        }
-      } catch (e) {
-        console.error('Failed to parse share URL state', e);
-      }
-    }
+    const library = buildNoteLibrary(initialNotes);
+    setNotes(library);
   }, []);
 
-  // Update theme helper
-  const toggleTheme = () => {
-    const newTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    document.documentElement.classList.toggle('dark', newTheme === 'dark');
-  };
-
-  // Parse markdown in real-time when it changes
-  const handleMarkdownChange = (val: string) => {
-    setMarkdown(val);
-    try {
-      const parsed = parseMorpheusMarkdown(val);
-      setParsedData(parsed);
-    } catch (e) {
-      console.error(e);
+  // 切换暗黑模式
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
     }
+  }, [darkMode]);
+
+  // 处理笔记更新（看板拖拽或编辑器保存）
+  const handleUpdateNote = (id: string, updates: Partial<Note>) => {
+    setNotes(prev => {
+      const currentNote = prev[id];
+      if (!currentNote) return prev;
+
+      let updatedNote = { ...currentNote, ...updates };
+
+      // 如果更新了 frontmatter，需要重新生成内容并解析出链
+      if (updates.frontmatter) {
+        updatedNote = updateNoteFrontmatter(currentNote, updates.frontmatter);
+      }
+
+      // 重新构建整个库以更新 backlinks
+      const rawNotesList = Object.values(prev).map(n => ({
+        id: n.id,
+        content: n.id === id 
+          ? `---\n${Object.entries(updatedNote.frontmatter).map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`).join('\n')}\n---\n${updatedNote.content}` 
+          : `---\n${Object.entries(n.frontmatter).map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`).join('\n')}\n---\n${n.content}`
+      }));
+
+      return buildNoteLibrary(rawNotesList);
+    });
   };
 
-  // Handle status transitions on Board cards
-  const handleCardStatusChange = (cardId: string, nextStatus: typeof parsedData.cards[0]['status']) => {
-    // Find card and update its status in Markdown
-    const updatedCards = parsedData.cards.map(c => {
-      if (c.id === cardId) {
-        return { ...c, status: nextStatus };
-      }
-      return c;
-    });
-
-    // Rebuild Markdown content with new checked/unchecked/prio/status
-    setParsedData(prev => ({
-      ...prev,
-      cards: updatedCards
-    }));
-
-    // Find the original list line of that card in Markdown and modify status
-    const lines = markdown.split('\n');
-    let cardTitle = '';
-    const foundCard = parsedData.cards.find(c => c.id === cardId);
-    if (!foundCard) return;
-    cardTitle = foundCard.title;
-
-    const modifiedLines = lines.map(line => {
-      if (line.trim().startsWith('-') && line.includes(cardTitle)) {
-        // Is checkbox card
-        let newLine = line;
-        if (nextStatus === 'completed') {
-          newLine = newLine.replace(/^(-\s*\[[ ]\])/, '- [x]');
-        } else {
-          newLine = newLine.replace(/^(-\s*\[[xX]\])/, '- [ ]');
+  // 编辑器保存
+  const handleSaveNote = (id: string, fullContent: string) => {
+    setNotes(prev => {
+      const rawNotesList = Object.values(prev).map(n => {
+        if (n.id === id) {
+          return { id, content: fullContent };
         }
+        // 重新组装其他笔记
+        const fmStr = Object.entries(n.frontmatter)
+          .map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`)
+          .join('\n');
+        return {
+          id: n.id,
+          content: `---\n${fmStr}\n---\n${n.content}`
+        };
+      });
 
-        // Replace status=xxx in curly braces if exists, or append it
-        if (newLine.includes('status=')) {
-          newLine = newLine.replace(/status=[a-zA-Z_]+/, `status=${nextStatus}`);
-        } else if (newLine.includes('{')) {
-          newLine = newLine.replace(/\{([^}]+)\}/, `{$1, status=${nextStatus}}`);
-        } else {
-          newLine = `${newLine} {status=${nextStatus}}`;
-        }
-        return newLine;
-      }
-      return line;
+      return buildNoteLibrary(rawNotesList);
     });
-
-    setMarkdown(modifiedLines.join('\n'));
   };
+
+  // 添加新笔记
+  const handleAddNote = (status: 'todo' | 'in_progress' | 'done' = 'todo') => {
+    const title = prompt('请输入新笔记标题：');
+    if (!title) return;
+
+    const id = title.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    if (!id) {
+      alert('标题无效！');
+      return;
+    }
+
+    if (notes[id]) {
+      alert('已存在同名笔记！');
+      return;
+    }
+
+    const newRawNote = {
+      id,
+      content: `---
+title: ${title}
+status: ${status}
+priority: low
+tags: []
+dueDate: ${new Date().toISOString().split('T')[0]}
+---
+# ${title}
+
+在此处输入笔记内容...
+`
+    };
+
+    setNotes(prev => {
+      const rawNotesList = Object.values(prev).map(n => {
+        const fmStr = Object.entries(n.frontmatter)
+          .map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`)
+          .join('\n');
+        return {
+          id: n.id,
+          content: `---\n${fmStr}\n---\n${n.content}`
+        };
+      });
+
+      rawNotesList.push(newRawNote);
+      const newLib = buildNoteLibrary(rawNotesList);
+      return newLib;
+    });
+
+    setSelectedNoteId(id);
+  };
+
+  // Morpheus 助手创建带内容的笔记
+  const handleAddNoteWithContent = (title: string, content: string) => {
+    const id = title.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    if (!id || notes[id]) return;
+
+    setNotes(prev => {
+      const rawNotesList = Object.values(prev).map(n => {
+        const fmStr = Object.entries(n.frontmatter)
+          .map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`)
+          .join('\n');
+        return {
+          id: n.id,
+          content: `---\n${fmStr}\n---\n${n.content}`
+        };
+      });
+
+      rawNotesList.push({ id, content });
+      return buildNoteLibrary(rawNotesList);
+    });
+  };
+
+  // 处理批量导入笔记
+  const handleImportNotes = (importedList: { id: string; content: string }[]) => {
+    setNotes(prev => {
+      const rawNotesList = Object.values(prev).map(n => {
+        const fmStr = Object.entries(n.frontmatter)
+          .map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`)
+          .join('\n');
+        return {
+          id: n.id,
+          content: `---\n${fmStr}\n---\n${n.content}`
+        };
+      });
+
+      // 避免重复导入同名笔记
+      importedList.forEach(imp => {
+        const existsIdx = rawNotesList.findIndex(n => n.id === imp.id);
+        if (existsIdx !== -1) {
+          rawNotesList[existsIdx] = imp;
+        } else {
+          rawNotesList.push(imp);
+        }
+      });
+
+      return buildNoteLibrary(rawNotesList);
+    });
+  };
+
+  // 过滤笔记
+  const filteredNotes = Object.keys(notes).reduce((acc, id) => {
+    const note = notes[id];
+    const matchesSearch = searchQuery === '' || 
+      note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      note.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (note.frontmatter.tags && note.frontmatter.tags.some(t => t.toLowerCase().includes(searchQuery.toLowerCase())));
+    
+    if (matchesSearch) {
+      acc[id] = note;
+    }
+    return acc;
+  }, {} as Record<string, Note>);
+
+  const selectedNote = selectedNoteId ? notes[selectedNoteId] : null;
 
   return (
-    <div className="min-h-screen flex flex-col bg-light-bg dark:bg-dark-bg text-gray-800 dark:text-gray-200 transition-colors">
-      
-      {/* HEADER / NAVIGATION BAR */}
-      <header className="sticky top-0 z-40 bg-white/85 dark:bg-dark-bg/85 backdrop-blur-md border-b border-light-border dark:border-dark-border py-4 px-6">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-          
-          {/* Logo Brand */}
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-primary rounded-xl text-white shadow-lg shadow-primary/20 flex items-center justify-center animate-pulse">
-              <Sparkles size={20} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-black tracking-tight text-gray-950 dark:text-white m-0">
-                  Morpheus
-                </h1>
-                <span className="text-[10px] font-bold px-2 py-0.5 bg-primary/10 text-primary rounded-full uppercase border border-primary/20">
-                  v1.0.0
-                </span>
-              </div>
-              <p className="text-[11px] text-gray-500 dark:text-gray-400">
-                看山实验室 · 多维交互 Markdown 可视化引擎
-              </p>
-            </div>
+    <div className="flex h-screen w-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50 transition-colors duration-200 overflow-hidden">
+      {/* 侧边导航栏 */}
+      <aside className="w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col z-10">
+        {/* 品牌 Logo */}
+        <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/30">
+            <span className="text-xl font-bold">M</span>
           </div>
-
-          {/* Center Title or Project info parsed from Markdown */}
-          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 bg-light-surface dark:bg-dark-surface rounded-full text-xs font-semibold border border-light-border dark:border-dark-border">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-            <span className="text-gray-400">当前项目:</span>
-            <span className="text-gray-900 dark:text-white max-w-[200px] truncate">{parsedData.projectName}</span>
-          </div>
-
-          {/* Actions on right */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowHelp(!showHelp)}
-              className="p-2.5 rounded-xl border border-light-border dark:border-dark-border bg-white dark:bg-dark-surface/50 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-all active:scale-95"
-              title="使用帮助"
-            >
-              <HelpCircle size={18} />
-            </button>
-            <button
-              onClick={toggleTheme}
-              className="p-2.5 rounded-xl border border-light-border dark:border-dark-border bg-white dark:bg-dark-surface/50 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-all active:scale-95"
-              title="切换主题"
-            >
-              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-            <button
-              onClick={() => setIsShareOpen(true)}
-              className="flex items-center gap-2 py-2 px-4 rounded-xl bg-primary text-white hover:bg-primary/90 font-bold text-sm shadow-md shadow-primary/10 transition-all active:scale-95"
-            >
-              <Share size={15} />
-              分享与导出
-            </button>
-          </div>
-
-        </div>
-      </header>
-
-      {/* HELP INSTRUCTIONS BANNER */}
-      {showHelp && (
-        <div className="bg-primary/5 dark:bg-primary/10 border-b border-primary/20 py-4 px-6 animate-in slide-in-from-top-4 duration-300">
-          <div className="max-w-4xl mx-auto flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
-            <div className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed flex-1">
-              <span className="font-bold text-primary text-sm block mb-1">💡 如何在这里书写属于你的可视化大屏？</span>
-              Morpheus 能够识别包含二级标题的 Markdown 文件：
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2 font-mono bg-white/60 dark:bg-dark-surface/50 p-2.5 rounded-lg border border-light-border dark:border-dark-border text-[10px] text-gray-700 dark:text-gray-300">
-                <div>
-                  <strong className="text-primary">1. ## Timeline 视图</strong><br/>
-                  - [2026-07-06] [record-entry] 标题: 摘要内容 &#123;prio=1, tags=a|b&#125;<br/>
-                  &nbsp;&nbsp;- [ ] 子任务清单<br/>
-                </div>
-                <div>
-                  <strong className="text-primary">2. ## Board 看板视图</strong><br/>
-                  - [ ] 任务标题: 详情摘要 &#123;prio=high, assignee=Morpheus, status=todo&#125;
-                </div>
-                <div>
-                  <strong className="text-primary">3. ## Graph 关系图谱</strong><br/>
-                  节点名称 &#123;type=project, val=12&#125;<br/>
-                  - 节点A -&gt; 节点B : 关系类型
-                </div>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowHelp(false)}
-              className="text-xs font-bold text-primary hover:underline self-end shrink-0"
-            >
-              我知道了，开始创作
-            </button>
+          <div>
+            <h1 className="font-bold text-slate-800 dark:text-slate-100 leading-tight">Morpheus</h1>
+            <span className="text-xs text-indigo-600 dark:text-indigo-400 font-semibold tracking-wider uppercase">Canvas</span>
           </div>
         </div>
-      )}
 
-      {/* MAIN CONTAINER: EDITOR & PREVIEW PANELS */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        
-        {/* LEFT COLUMN: MARKDOWN EDITOR (5 cols) */}
-        <section className="lg:col-span-5 flex flex-col gap-4">
-          <div className="bg-white/80 dark:bg-dark-surface/80 rounded-2xl p-5 border border-light-border dark:border-dark-border shadow-sm flex-1 flex flex-col min-h-[500px]">
-            
-            <div className="flex items-center justify-between mb-3 border-b border-light-border dark:border-dark-border pb-3">
-              <span className="font-bold text-sm text-gray-900 dark:text-white flex items-center gap-1.5">
-                <Edit3 size={15} className="text-primary" />
-                编辑器 (Markdown Editor)
-              </span>
-              <span className="text-[10px] text-gray-400 font-mono">
-                {markdown.length} 字符
-              </span>
-            </div>
-
-            {/* Main Textarea Editor */}
-            <textarea
-              value={markdown}
-              onChange={(e) => handleMarkdownChange(e.target.value)}
-              placeholder="# 输入你的 Markdown 项目概要..."
-              className="flex-1 w-full p-4 rounded-xl border border-light-border dark:border-dark-border bg-light-bg/40 dark:bg-dark-bg/40 text-gray-900 dark:text-gray-100 font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all resize-none overflow-y-auto"
-              style={{ minHeight: '380px' }}
+        {/* 搜索框 */}
+        <div className="p-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="搜索笔记或标签..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg pl-9 pr-4 py-2 text-xs focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-500 transition-colors"
             />
           </div>
+        </div>
 
-          {/* Quick preset templates on bottom left */}
-          <div className="flex flex-col gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-gray-400 px-1">
-              试试看山实验室精选模板 🎨
-            </span>
-            <PresetTemplates onSelect={handleMarkdownChange} theme={theme} />
+        {/* 视图切换 */}
+        <nav className="flex-1 px-4 space-y-1.5 overflow-y-auto">
+          <button
+            onClick={() => setViewMode('kanban')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-150 ${
+              viewMode === 'kanban'
+                ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+            }`}
+          >
+            <LayoutDashboard size={18} />
+            <span>多维交互看板</span>
+          </button>
+          <button
+            onClick={() => setViewMode('graph')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-150 ${
+              viewMode === 'graph'
+                ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+            }`}
+          >
+            <Network size={18} />
+            <span>关系图谱引擎</span>
+          </button>
+
+          <button
+            onClick={() => setShowAssistant(!showAssistant)}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-150 ${
+              showAssistant
+                ? 'bg-purple-50 dark:bg-purple-950/30 text-purple-600 dark:text-purple-400'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+            }`}
+          >
+            <Bot size={18} />
+            <span>Morpheus AI 助手</span>
+          </button>
+
+          {/* 导入导出组件 */}
+          <div className="pt-4 mt-4 border-t border-slate-100 dark:border-slate-800/60">
+            <ImportExport notes={notes} onImportNotes={handleImportNotes} />
           </div>
-        </section>
+        </nav>
 
-        {/* RIGHT COLUMN: INTERACTIVE VISVIEW (7 cols) */}
-        <section className="lg:col-span-7 flex flex-col gap-4">
-          
-          {/* Tabs for switching visual representations */}
-          <div className="bg-white/85 dark:bg-dark-surface/85 backdrop-blur-md rounded-2xl p-2.5 border border-light-border dark:border-dark-border shadow-sm flex items-center justify-between">
-            <div className="flex gap-1.5 w-full">
-              
-              <button
-                onClick={() => setActiveTab('timeline')}
-                className={`flex-1 py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all duration-300 ${
-                  activeTab === 'timeline'
-                    ? 'bg-primary text-white shadow-md shadow-primary/20'
-                    : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-light-surface dark:hover:bg-dark-surface/50'
-                }`}
-              >
-                <Milestone size={14} />
-                Timeline 时间线 ({parsedData.events.length})
-              </button>
+        {/* 底部设置与关于 */}
+        <div className="p-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
+          <button
+            onClick={() => handleAddNote('todo')}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg shadow-md shadow-indigo-500/20 hover:shadow-lg hover:shadow-indigo-500/30 transition-all duration-150"
+          >
+            <Plus size={14} />
+            <span>新建 Markdown 笔记</span>
+          </button>
 
-              <button
-                onClick={() => setActiveTab('board')}
-                className={`flex-1 py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all duration-300 ${
-                  activeTab === 'board'
-                    ? 'bg-primary text-white shadow-md shadow-primary/20'
-                    : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-light-surface dark:hover:bg-dark-surface/50'
-                }`}
-              >
-                <Kanban size={14} />
-                Board 看板 ({parsedData.cards.length})
-              </button>
-
-              <button
-                onClick={() => setActiveTab('graph')}
-                className={`flex-1 py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all duration-300 ${
-                  activeTab === 'graph'
-                    ? 'bg-primary text-white shadow-md shadow-primary/20'
-                    : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-light-surface dark:hover:bg-dark-surface/50'
-                }`}
-              >
-                <Network size={14} />
-                Graph 关系网 ({parsedData.nodes.length})
-              </button>
-
+          <div className="flex items-center justify-between pt-2">
+            <div className="flex items-center gap-1.5 text-slate-400 dark:text-slate-500 text-xs">
+              <HelpCircle size={14} />
+              <span>看山实验室 Morpheus</span>
             </div>
-          </div>
-
-          {/* ACTIVE VIEW PORTAL CONTAINER */}
-          <div className="flex-1 bg-white/50 dark:bg-dark-surface/30 backdrop-blur-sm rounded-3xl p-4 md:p-6 border border-light-border dark:border-dark-border shadow-sm overflow-hidden flex flex-col justify-start min-h-[450px]">
-            
-            {/* View Title Info */}
-            <div className="mb-4 flex items-center justify-between text-xs text-gray-500 px-1 border-b border-light-border dark:border-dark-border pb-3">
-              <span className="font-bold flex items-center gap-1 text-gray-800 dark:text-gray-200 uppercase">
-                {activeTab === 'timeline' && <Milestone size={13} className="text-[#10b981]" />}
-                {activeTab === 'board' && <Kanban size={13} className="text-[#f59e0b]" />}
-                {activeTab === 'graph' && <Network size={13} className="text-[#aa3bff]" />}
-                {activeTab === 'timeline' && '交互式项目时间线 / 里程碑流'}
-                {activeTab === 'board' && '敏捷看板视图 / 卡片流'}
-                {activeTab === 'graph' && '项目全景知识图谱 (力导向图)'}
-              </span>
-              <span className="text-[10px] font-semibold text-primary bg-primary-light dark:bg-primary/20 px-2 py-0.5 rounded-full capitalize">
-                实时编译中
-              </span>
-            </div>
-
-            {/* Dynamic Rendering Views */}
-            <div className="flex-1 overflow-y-auto max-h-[650px] rounded-2xl">
-              {activeTab === 'timeline' && (
-                parsedData.events.length === 0 ? (
-                  <div className="py-24 text-center">
-                    <p className="text-sm text-gray-400 mb-1">未检测到 Timeline 格式的内容</p>
-                    <p className="text-xs text-gray-400">请参照 ## Timeline 并输入带有日期 [YYYY-MM-DD] 的列表项。</p>
-                  </div>
-                ) : (
-                  <TimelineView events={parsedData.events} />
-                )
-              )}
-
-              {activeTab === 'board' && (
-                parsedData.cards.length === 0 ? (
-                  <div className="py-24 text-center">
-                    <p className="text-sm text-gray-400 mb-1">未检测到 Board 格式的内容</p>
-                    <p className="text-xs text-gray-400">请参照 ## Board 并书写带有选择框 - [ ] 的列表项。</p>
-                  </div>
-                ) : (
-                  <BoardView cards={parsedData.cards} onCardStatusChange={handleCardStatusChange} />
-                )
-              )}
-
-              {activeTab === 'graph' && (
-                parsedData.nodes.length <= 1 ? (
-                  <div className="py-24 text-center">
-                    <p className="text-sm text-gray-400 mb-1">未检测到 Graph 格式的内容</p>
-                    <p className="text-xs text-gray-400">请参照 ## Graph 书写节点及其关系，或者让系统默认生成项目关联图。</p>
-                  </div>
-                ) : (
-                  <SimpleForceGraph nodes={parsedData.nodes} links={parsedData.links} theme={theme} />
-                )
-              )}
-            </div>
-
-          </div>
-        </section>
-
-      </main>
-
-      {/* FOOTER */}
-      <footer className="bg-white/40 dark:bg-dark-bg/40 border-t border-light-border dark:border-dark-border py-6 px-6 mt-12 text-center text-xs text-gray-500">
-        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <span className="font-bold text-gray-700 dark:text-gray-300">看山先生的AI实验室</span>
-            <span className="text-gray-400">|</span>
-            <span>Morpheus 可视化画布开源项目</span>
-          </div>
-          <div className="flex gap-4 items-center">
-            <a 
-              href="https://github.com" 
-              target="_blank" 
-              rel="noreferrer" 
-              className="hover:text-primary transition-colors flex items-center gap-1.5"
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition-colors"
+              title={darkMode ? '浅色模式' : '深色模式'}
             >
-              <svg className="w-3.5 h-3.5 fill-current inline" viewBox="0 0 16 16">
-                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.93.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-              </svg>
-              GitHub 仓库
-            </a>
-            <span className="text-gray-300">|</span>
-            <span className="text-gray-400">Designed with 💜 by Morpheus Agent</span>
+              {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
           </div>
         </div>
-      </footer>
+      </aside>
 
-      {/* MODAL WINDOWS */}
-      <ShareModal 
-        markdown={markdown}
-        projectName={parsedData.projectName}
-        isOpen={isShareOpen}
-        onClose={() => setIsShareOpen(false)}
-      />
+      {/* 主工作区 */}
+      <main className="flex-1 flex overflow-hidden relative bg-slate-50 dark:bg-slate-950">
+        <div className="flex-1 h-full overflow-hidden">
+          {viewMode === 'kanban' ? (
+            <KanbanBoard
+              notes={filteredNotes}
+              onUpdateNote={handleUpdateNote}
+              onSelectNote={setSelectedNoteId}
+              onAddNote={handleAddNote}
+            />
+          ) : (
+            <RelationshipGraph
+              notes={filteredNotes}
+              onSelectNote={setSelectedNoteId}
+              onUpdateNote={handleUpdateNote}
+              selectedNoteId={selectedNoteId}
+            />
+          )}
+        </div>
 
+        {/* 侧边栏编辑器 */}
+        {selectedNote && (
+          <NoteEditor
+            note={selectedNote}
+            allNotes={notes}
+            onClose={() => setSelectedNoteId(null)}
+            onSave={handleSaveNote}
+            onSelectNote={setSelectedNoteId}
+          />
+        )}
+
+        {/* Morpheus AI 思考助手侧边栏 */}
+        {showAssistant && (
+          <MorpheusAssistant
+            notes={notes}
+            onUpdateNote={handleUpdateNote}
+            onSelectNote={setSelectedNoteId}
+            onAddNoteWithContent={handleAddNoteWithContent}
+          />
+        )}
+      </main>
     </div>
   );
 }
+
+export default App;

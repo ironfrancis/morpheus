@@ -1,0 +1,61 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./morpheus.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model DreamSession {
+  id            String   @id @default(cuid())
+  agentId       String
+  agentName     String
+  projectSlug   String
+  rawTrace      String
+  summary       String
+  healthScore   Int      @default(100)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  memories      ConsolidatedMemory[]
+  insights      AgentInsight[]
+
+  @@index([agentId])
+  @@index([projectSlug])
+}
+
+model ConsolidatedMemory {
+  id             String   @id @default(cuid())
+  sessionId      String
+  entitySubject  String
+  entityObject   String
+  relation       String
+  fact           String
+  importance     Int      @default(3)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  session        DreamSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([entitySubject])
+  @@index([entityObject])
+}
+
+model AgentInsight {
+  id             String   @id @default(cuid())
+  sessionId      String
+  type           String   // INSIGHT_ACHIEVEMENT | INSIGHT_TECH_DEBT | INSIGHT_WARNING
+  category       String
+  title          String
+  content        String
+  isResolved     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  session        DreamSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([type])
+}

@@ -11,7 +11,10 @@ import {
   CheckCircle2, 
   Plus, 
   Send,
-  Bot
+  Bot,
+  Settings,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -22,7 +25,7 @@ interface MorpheusAssistantProps {
   onAddNoteWithContent: (title: string, content: string, status?: 'todo' | 'in_progress' | 'done') => void;
 }
 
-type TabType = 'chat' | 'health' | 'ai-tasks';
+type TabType = 'chat' | 'health' | 'ai-tasks' | 'settings';
 
 interface Message {
   sender: 'user' | 'morpheus';
@@ -42,6 +45,19 @@ export const MorpheusAssistant: React.FC<MorpheusAssistantProps> = ({
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsDarkTyping] = useState(false);
 
+  // API 配置状态
+  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('morpheus_api_key') || '');
+  const [baseUrl, setBaseUrl] = useState<string>(() => localStorage.getItem('morpheus_base_url') || 'https://api.openai.com/v1');
+  const [model, setModel] = useState<string>(() => localStorage.getItem('morpheus_model') || 'gpt-4o-mini');
+  const [showApiKey, setShowApiKey] = useState<boolean>(false);
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
+  const [testError, setTestError] = useState<string>('');
+
+  // 欢迎语中的提示行为配置
+  const triggerDeepAnalysis = () => {
+    handleSendMessage('帮我分析一下当前的知识库结构');
+  };
+
   // 初始化欢迎语
   useEffect(() => {
     if (messages.length === 0) {
@@ -51,8 +67,9 @@ export const MorpheusAssistant: React.FC<MorpheusAssistantProps> = ({
           text: '你好！我是看山实验室的数字员工 **Morpheus**。作为你的 AI 思考伙伴，我可以帮你分析当前的知识图谱、诊断知识库健康度、推荐智能双链，或者帮你将复杂的笔记分解为具体的看板任务。你可以试着问我：“帮我分析一下知识库” 或 “有哪些知识孤岛？”',
           timestamp: new Date(),
           suggestions: [
-            { label: '📊 深度分析知识库', action: () => handleSendMessage('帮我分析一下当前的知识库结构') },
+            { label: '📊 深度分析知识库', action: triggerDeepAnalysis },
             { label: '🔍 查找知识孤岛', action: () => setActiveTab('health') },
+            { label: '⚙️ 配置 AI 密钥', action: () => setActiveTab('settings') },
           ]
         }
       ]);
@@ -138,7 +155,72 @@ export const MorpheusAssistant: React.FC<MorpheusAssistantProps> = ({
     alert(`成功在《${sourceNote.title}》中添加了指向《${notes[targetId]?.title || targetId}》的双向链接！关系图谱已实时更新。`);
   };
 
-  // --- 2. 智能问答 (RAG Chat) 引擎 ---
+  // --- 2. 智能大模型与本地 RAG 引擎 ---
+  const callRealLLM = async (systemPrompt: string, userMessage: string): Promise<string> => {
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.7
+        })
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error?.message || `HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || '未返回有效回答。';
+    } catch (err: any) {
+      console.error('LLM API Error:', err);
+      throw err;
+    }
+  };
+
+  const buildRagContext = () => {
+    return noteList.map(n => {
+      const fmStr = Object.entries(n.frontmatter)
+        .map(([k, v]) => Array.isArray(v) ? `${k}: [${v.join(', ')}]` : `${k}: ${v}`)
+        .join('\n');
+      return `=== FILE_ID: ${n.id} ===\nTitle: ${n.title}\nFrontmatter:\n${fmStr}\nContent:\n${n.content}\nLinks: ${n.links.join(', ') || '无'}\nBacklinks: ${n.backlinks.join(', ') || '无'}\n=== END FILE ===`;
+    }).join('\n\n');
+  };
+
+  // 测试 API 接口连接
+  const handleTestConnection = async () => {
+    if (!apiKey.trim()) {
+      setTestStatus('failed');
+      setTestError('API 密钥不能为空！');
+      return;
+    }
+    setTestStatus('testing');
+    setTestError('');
+
+    try {
+      const res = await callRealLLM('You are a helpful assistant. Respond with "Connection Successful" if you receive this.', 'Ping');
+      if (res.toLowerCase().includes('connect') || res.length > 0) {
+        setTestStatus('success');
+      } else {
+        setTestStatus('failed');
+        setTestError('大模型未返回预期响应。');
+      }
+    } catch (err: any) {
+      setTestStatus('failed');
+      setTestError(err.message || '网络或 CORS 跨域错误！若使用第三方代理，请确保支持跨域。');
+    }
+  };
+
+  // 智能问答 (RAG Chat) 引擎
   const handleSendMessage = (text: string) => {
     if (!text.trim()) return;
 
@@ -152,36 +234,81 @@ export const MorpheusAssistant: React.FC<MorpheusAssistantProps> = ({
     setInputValue('');
     setIsDarkTyping(true);
 
-    // 模拟 RAG 检索与回答
-    setTimeout(() => {
-      let responseText = '';
-      const query = text.toLowerCase();
+    if (apiKey.trim()) {
+      // 真实大模型 RAG 检索调用
+      const systemPrompt = `你叫 Morpheus，是看山实验室（看山先生的 AI 实验室）的数字员工、AI 知识研究员和思考伙伴。
+请根据用户的本地 Markdown 笔记库内容回答用户的提问，进行深度的 RAG 分析、概念归纳、双链推荐、或者进行相关的技术与思路拓展。
 
-      if (query.includes('分析') || query.includes('知识库') || query.includes('结构') || query.includes('图谱')) {
-        responseText = `### 📊 Morpheus Canvas 知识库深度分析报告
+以下是用户的本地笔记库数据（标准 Markdown 文件及元数据投影）：
+${buildRagContext()}
+
+【回答规范】
+1. 始终使用简体中文回答，语气要专业、启发性、优雅睿智，完美体现看山实验室 Morpheus 数字员工的人设。
+2. 极其重要：在回答中，尽可能使用 [[Note ID]] 语法来引用或指向上面笔记库中已有的笔记（例如 [[morpheus-canvas]]），用户可以直接点击这些链接进行跳转。Note ID 需要和上述提供的 FILE_ID 一致（英文小写，连字符，且不要包含 markdown 的其他特殊字符）。
+3. 如果某些概念或课题在笔记库中没有，但你认为对用户极其有价值，你可以强烈建议用户创建它，在文本中写为 [[new-note-id|建议的标题]]。
+4. 使用标准 Markdown 语法排版（支持列表、粗体、斜体、引用和代码块），使分析报告层次分明、极具可读性。`;
+
+      callRealLLM(systemPrompt, text)
+        .then(resText => {
+          setMessages(prev => [...prev, {
+            sender: 'morpheus',
+            text: resText,
+            timestamp: new Date()
+          }]);
+        })
+        .catch(err => {
+          setMessages(prev => [...prev, {
+            sender: 'morpheus',
+            text: `⚠️ **API 调用发生错误**：${err.message}\n\n已自动为您切回本地离线模拟响应（请检查「API 配置」标签页内的配置是否正确，如 API 密钥、CORS 支持等）。\n\n---\n\n` + simulateOfflineResponse(text),
+            timestamp: new Date()
+          }]);
+        })
+        .finally(() => {
+          setIsDarkTyping(false);
+        });
+    } else {
+      // 离线模拟 RAG
+      setTimeout(() => {
+        const responseText = simulateOfflineResponse(text);
+        setMessages(prev => [...prev, {
+          sender: 'morpheus',
+          text: responseText,
+          timestamp: new Date()
+        }]);
+        setIsDarkTyping(false);
+      }, 1000);
+    }
+  };
+
+  const simulateOfflineResponse = (text: string): string => {
+    let responseText = '';
+    const query = text.toLowerCase();
+
+    if (query.includes('分析') || query.includes('知识库') || query.includes('结构') || query.includes('图谱')) {
+      responseText = `### 📊 Morpheus Canvas 知识库深度分析报告
 
 经过我的检索与计算，当前知识库的结构特征如下：
 
 1. **知识库规模**：当前共有 **${totalNotes}** 篇 Markdown 笔记，包含 **${totalLinks}** 个双向引用链接。
 2. **网状化指数**：当前为 **${networkIndex}%**。${
-          networkIndex > 150 
-            ? '这是一个高度互联的网状知识库，笔记之间的关联非常紧密，有利于知识的网状探索和灵感碰撞！' 
-            : networkIndex > 80
-            ? '知识库呈现出健康的网状结构，核心概念已建立连接，建议继续补充细节笔记的关联。'
-            : '当前知识库的网状化程度较低，存在较多孤立的知识点。建议通过双链 \`[[双链语法]]\` 将概念连接起来，激活你的“第二大脑”。'
-        }
+        networkIndex > 150 
+          ? '这是一个高度互联的网状知识库，笔记之间的关联非常紧密，有利于知识的网状探索和灵感碰撞！' 
+          : networkIndex > 80
+          ? '知识库呈现出健康的网状结构，核心概念已建立连接，建议继续补充细节笔记的关联。'
+          : '当前知识库的网状化程度较低，存在较多孤立的知识点。建议通过双链 \`[[双链语法]]\` 将概念连接起来，激活你的“第二大脑”。'
+      }
 3. **核心知识枢纽 (Hubs)**：
 ${hubNotes.map((n, i) => `   - **${i+1}. [[${n.id}]]** (关联数: ${n.degree})：承载了较多核心概念，是知识库的骨架。`).join('\n')}
 4. **健康度诊断**：
    - 发现 **${orphanNotes.length}** 个知识孤岛（未与其他任何笔记建立连接）。
    - 建议在侧边栏的 **「健康诊断」** 标签页中，一键采纳我的双链推荐，激活这些孤立的知识。`;
-      } else if (query.includes('孤岛') || query.includes('未连接') || query.includes('健康')) {
-        if (orphanNotes.length === 0) {
-          responseText = `### 🎉 完美！当前知识库没有“知识孤岛”
+    } else if (query.includes('孤岛') || query.includes('未连接') || query.includes('健康')) {
+      if (orphanNotes.length === 0) {
+        responseText = `### 🎉 完美！当前知识库没有“知识孤岛”
 
 所有的笔记都通过双向链接有机地结合在一起。你的知识网络非常健康，继续保持！`;
-        } else {
-          responseText = `### 🔍 知识孤岛诊断
+      } else {
+        responseText = `### 🔍 知识孤岛诊断
 
 当前发现 **${orphanNotes.length}** 篇笔记处于孤立状态（无任何出链和入链）：
 
@@ -191,11 +318,11 @@ ${orphanNotes.map(n => {
 }).join('\n')}
 
 你可以直接在 **「健康诊断」** 面板中，一键为它们建立双链连接，或者双击图谱中的节点进行手动连线。`;
-        }
-      } else if (query.includes('周报') || query.includes('摘要') || query.includes('总结')) {
-        responseText = `### 📝 Morpheus Canvas 知识库周报 (自动生成)
+      }
+    } else if (query.includes('周报') || query.includes('摘要') || query.includes('总结')) {
+      responseText = `### 📝 Morpheus Canvas 知识库周报 (自动生成)
 
-**生成时间**：2026年7月6日 (看山实验室 Morpheus 运行时)
+**生成时间**：2026年7月24日 (看山实验室 Morpheus 运行时)
 
 #### 一、 知识版图进展
 本周知识库主要围绕 **Morpheus Canvas 核心架构** 展开，重点完善了以下模块：
@@ -207,13 +334,13 @@ ${orphanNotes.map(n => {
 1. **[[data-flow-and-parser|数据流与解析器]]** 目前状态为 \`todo\`，优先级较低，建议尽快启动，以支撑更复杂的 Markdown 语法解析。
 2. 发现 **[[note-editor-component|侧边栏编辑器]]** 已经完成 (\`done\`)，可以很好地支持实时预览和双向链接跳转。
 3. 建议针对 **${orphanNotes.length}** 个孤岛节点进行链接补充，使知识网络更加连通。`;
-      } else {
-        // 模糊匹配
-        const matchedNote = noteList.find(n => query.includes(n.title.toLowerCase()) || query.includes(n.id));
-        if (matchedNote) {
-          responseText = `### 📖 关于《${matchedNote.title}》的分析
+    } else {
+      // 模糊匹配
+      const matchedNote = noteList.find(n => query.includes(n.title.toLowerCase()) || query.includes(n.id));
+      if (matchedNote) {
+        responseText = `### 📖 关于《${matchedNote.title}》的分析
 
-我为你找到了相关笔记 **[[${matchedNote.id}]]**，其当前状态为 \`\${matchedNote.frontmatter.status || 'todo'}\`，优先级为 \`\${matchedNote.frontmatter.priority || 'low'}\`。
+我为你找到了相关笔记 **[[${matchedNote.id}]]**，其当前状态为 \`${matchedNote.frontmatter.status || 'todo'}\`，优先级为 \`${matchedNote.frontmatter.priority || 'low'}\`。
 
 **内容摘要**：
 > ${matchedNote.content.replace(/[#*`[\]]/g, '').slice(0, 150)}...
@@ -223,24 +350,15 @@ ${orphanNotes.map(n => {
 - **被引用的笔记 (Backlinks)**：${matchedNote.backlinks.map(l => `[[${l}]]`).join(', ') || '无'}
 
 你可以直接点击上方的链接跳转到对应笔记，或在编辑器中继续完善它。`;
-        } else {
-          responseText = `收到！关于“${text}”，我检索了你的整个知识库。
+      } else {
+        responseText = `收到！关于“${text}”，我检索了你的整个知识库。
 
 目前知识库中与此最相关的核心笔记是 **[[morpheus-canvas]]**。建议你可以围绕这个核心，创建更多相关的笔记，并使用 \`[[双链]]\` 建立关联。
 
 如果你想让我帮你把某个复杂的想法分解成具体的任务卡片，可以切换到 **「AI 任务分解」** 标签页，我会为你提供一键生成子卡片的服务！`;
-        }
       }
-
-      const morpheusMsg: Message = {
-        sender: 'morpheus',
-        text: responseText,
-        timestamp: new Date()
-      };
-
-      setMessages(prev => [...prev, morpheusMsg]);
-      setIsDarkTyping(false);
-    }, 1200);
+    }
+    return responseText;
   };
 
   // --- 3. AI 任务分解功能 ---
@@ -251,6 +369,74 @@ ${orphanNotes.map(n => {
     const note = notes[selectedDecomposeId];
     if (!note) return;
 
+    setIsDarkTyping(true);
+    setDecomposedTasks([]);
+
+    if (apiKey.trim()) {
+      const systemPrompt = `你叫 Morpheus，是看山实验室（看山先生的 AI 实验室）的数字员工。你的任务是将用户提供的一篇复杂的 Markdown 笔记，分解为看板上 3 个具体的、互相关联的子任务卡片。
+父笔记标题：《${note.title}》
+父笔记 ID：${note.id}
+父笔记内容：
+"""
+${note.content}
+"""
+
+请将它分解为 3 个具体的、可执行的、带有 Frontmatter 的 Markdown 任务卡片。
+输出格式要求：
+你必须输出且仅输出一个合法的 JSON 数组，不要包含任何 markdown 解释性文字，只输出符合以下格式的 JSON 数组：
+[
+  {
+    "title": "子任务卡片标题 1",
+    "content": "---\\ntitle: 子任务卡片标题 1\\nstatus: todo\\npriority: medium\\ntags: [ai-decomposed, ${note.id}]\\ndueDate: 2026-07-28\\n---\\n# 子任务卡片标题 1\\n\\n关联父笔记：[[${note.id}]]\\n\\n## 任务详情\\n- [ ] 任务描述项 A\\n- [ ] 任务描述项 B\\n"
+  },
+  {
+    "title": "子任务卡片标题 2",
+    "content": "---\\ntitle: 子任务卡片标题 2\\nstatus: todo\\npriority: low\\ntags: [ai-decomposed, ${note.id}]\\ndueDate: 2026-07-30\\n---\\n# 子任务卡片标题 2\\n\\n关联父笔记：[[${note.id}]]\\n\\n## 任务详情\\n- [ ] 任务描述项 A\\n"
+  },
+  {
+    "title": "子任务卡片标题 3",
+    "content": "---\\ntitle: 子任务卡片标题 3\\nstatus: todo\\npriority: high\\ntags: [ai-decomposed, ${note.id}]\\ndueDate: 2026-08-01\\n---\\n# 子任务卡片标题 3\\n\\n关联父笔记：[[${note.id}]]\\n\\n## 任务详情\\n- [ ] 任务描述项 A\\n"
+  }
+]`;
+
+      callRealLLM(systemPrompt, `请分解笔记《${note.title}》`)
+        .then(resText => {
+          try {
+            let cleaned = resText.trim();
+            if (cleaned.startsWith('```json')) {
+              cleaned = cleaned.substring(7);
+            } else if (cleaned.startsWith('```')) {
+              cleaned = cleaned.substring(3);
+            }
+            if (cleaned.endsWith('```')) {
+              cleaned = cleaned.substring(0, cleaned.length - 3);
+            }
+            cleaned = cleaned.trim();
+            const tasks = JSON.parse(cleaned);
+            if (Array.isArray(tasks)) {
+              setDecomposedTasks(tasks);
+            } else {
+              throw new Error('返回的 JSON 不是一个数组');
+            }
+          } catch (e: any) {
+            console.error('JSON Parse Error of decomposed tasks:', e);
+            alert(`AI 任务分解成功返回，但解析 JSON 失败。错误：${e.message}。我们将自动为您降级使用模拟分解结果。`);
+            runSimulationDecompose(note);
+          }
+        })
+        .catch(err => {
+          alert(`AI 任务分解调用 API 失败：${err.message}。已自动为您降级至模拟生成结果。`);
+          runSimulationDecompose(note);
+        })
+        .finally(() => {
+          setIsDarkTyping(false);
+        });
+    } else {
+      runSimulationDecompose(note);
+    }
+  };
+
+  const runSimulationDecompose = (note: Note) => {
     setIsDarkTyping(true);
     setDecomposedTasks([]);
 
@@ -548,36 +734,51 @@ dueDate: 2026-07-16
       <div className="flex border-b border-slate-100 dark:border-slate-900 px-2 py-1 bg-slate-50/50 dark:bg-slate-900/10">
         <button
           onClick={() => setActiveTab('health')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-md transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-2 text-[11px] font-semibold rounded-md transition-all ${
             activeTab === 'health'
               ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm'
               : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
           }`}
+          title="健康诊断"
         >
-          <Activity size={13} />
+          <Activity size={12} />
           <span>健康诊断</span>
         </button>
         <button
           onClick={() => setActiveTab('chat')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-md transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-2 text-[11px] font-semibold rounded-md transition-all ${
             activeTab === 'chat'
               ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm'
               : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
           }`}
+          title="智能问答"
         >
-          <MessageSquare size={13} />
+          <MessageSquare size={12} />
           <span>智能问答</span>
         </button>
         <button
           onClick={() => setActiveTab('ai-tasks')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-md transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-2 text-[11px] font-semibold rounded-md transition-all ${
             activeTab === 'ai-tasks'
               ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm'
               : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
           }`}
+          title="任务分解"
         >
-          <Compass size={13} />
+          <Compass size={12} />
           <span>任务分解</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={`flex-1 flex items-center justify-center gap-1 py-2 text-[11px] font-semibold rounded-md transition-all ${
+            activeTab === 'settings'
+              ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm'
+              : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+          }`}
+          title="API配置"
+        >
+          <Settings size={12} />
+          <span>API配置</span>
         </button>
       </div>
 
@@ -863,6 +1064,162 @@ dueDate: 2026-07-16
                   </button>
                 </div>
               )}
+            </motion.div>
+          )}
+
+          {activeTab === 'settings' && (
+            <motion.div
+              key="settings"
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              className="space-y-4"
+            >
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <Settings size={14} className="text-indigo-500" />
+                  <span>AI 思考伙伴大模型配置</span>
+                </h4>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-relaxed">
+                  在此处输入你的 API 配置后，Morpheus 即可为您提供 100% 真实的 RAG 知识检索、分析问答以及自动任务拆分卡片。若为空则自动降级运行离线模拟响应。所有配置安全地保存在本地 LocalStorage 中。
+                </p>
+              </div>
+
+              {/* API 密钥 */}
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-400 dark:text-slate-500 block">API 密钥 (API Key)：</label>
+                <div className="relative">
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    placeholder="sk-..."
+                    value={apiKey}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setApiKey(val);
+                      localStorage.setItem('morpheus_api_key', val);
+                      setTestStatus('idle');
+                    }}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-3 pr-9 py-2 text-xs focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-500 transition-colors text-slate-700 dark:text-slate-300 font-semibold"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                  >
+                    {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* API 端点 */}
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-400 dark:text-slate-500 block">API 端点 (Base URL)：</label>
+                <input
+                  type="text"
+                  placeholder="https://api.openai.com/v1"
+                  value={baseUrl}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setBaseUrl(val);
+                    localStorage.setItem('morpheus_base_url', val);
+                    setTestStatus('idle');
+                  }}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-500 transition-colors text-slate-700 dark:text-slate-300 font-semibold"
+                />
+              </div>
+
+              {/* 模型名称 */}
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-400 dark:text-slate-500 block">大模型名称 (Model)：</label>
+                <input
+                  type="text"
+                  placeholder="gpt-4o-mini"
+                  value={model}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setModel(val);
+                    localStorage.setItem('morpheus_model', val);
+                    setTestStatus('idle');
+                  }}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-500 transition-colors text-slate-700 dark:text-slate-300 font-semibold"
+                />
+              </div>
+
+              {/* 预设推荐 */}
+              <div className="space-y-1.5 pt-1">
+                <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500">预设配置一键套用：</span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => {
+                      setBaseUrl('https://api.deepseek.com/v1');
+                      setModel('deepseek-chat');
+                      localStorage.setItem('morpheus_base_url', 'https://api.deepseek.com/v1');
+                      localStorage.setItem('morpheus_model', 'deepseek-chat');
+                      setTestStatus('idle');
+                    }}
+                    className="text-[10px] px-2 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 font-semibold rounded-md border border-slate-200 dark:border-slate-800 transition-colors"
+                  >
+                    🚀 DeepSeek
+                  </button>
+                  <button
+                    onClick={() => {
+                      setBaseUrl('https://api.openai.com/v1');
+                      setModel('gpt-4o-mini');
+                      localStorage.setItem('morpheus_base_url', 'https://api.openai.com/v1');
+                      localStorage.setItem('morpheus_model', 'gpt-4o-mini');
+                      setTestStatus('idle');
+                    }}
+                    className="text-[10px] px-2 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 font-semibold rounded-md border border-slate-200 dark:border-slate-800 transition-colors"
+                  >
+                    🪐 OpenAI
+                  </button>
+                  <button
+                    onClick={() => {
+                      setBaseUrl('http://localhost:11434/v1');
+                      setModel('qwen2.5:7b');
+                      localStorage.setItem('morpheus_base_url', 'http://localhost:11434/v1');
+                      localStorage.setItem('morpheus_model', 'qwen2.5:7b');
+                      setTestStatus('idle');
+                    }}
+                    className="text-[10px] px-2 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 font-semibold rounded-md border border-slate-200 dark:border-slate-800 transition-colors"
+                  >
+                    🏠 Ollama (本地)
+                  </button>
+                </div>
+              </div>
+
+              {/* 测试连接按钮 */}
+              <div className="pt-2 space-y-2">
+                <button
+                  onClick={handleTestConnection}
+                  disabled={testStatus === 'testing'}
+                  className={`w-full flex items-center justify-center gap-1.5 py-2 text-xs font-bold rounded-lg shadow-md transition-all ${
+                    testStatus === 'testing'
+                      ? 'bg-indigo-400 text-white cursor-not-allowed'
+                      : testStatus === 'success'
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/10'
+                      : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-500/10'
+                  }`}
+                >
+                  <Sparkles size={13} />
+                  <span>
+                    {testStatus === 'testing' ? '正在测试连接...' : testStatus === 'success' ? '连接成功！测试通过' : '测试 API 接口连接'}
+                  </span>
+                </button>
+
+                {/* 测试状态反馈 */}
+                {testStatus === 'success' && (
+                  <p className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100/50 dark:border-emerald-900/30 p-2 rounded-lg text-center font-semibold">
+                    🎉 完美！大模型握手成功，Morpheus 真实智能大脑已激活。
+                  </p>
+                )}
+                {testStatus === 'failed' && (
+                  <div className="text-[10px] text-rose-600 dark:text-rose-400 bg-rose-50/50 dark:bg-rose-950/20 border border-rose-100/50 dark:border-rose-900/30 p-2 rounded-lg space-y-1">
+                    <p className="font-bold">❌ 连接失败：</p>
+                    <p className="leading-relaxed font-semibold">{testError}</p>
+                  </div>
+                )}
+              </div>
             </motion.div>
           )}
         </AnimatePresence>

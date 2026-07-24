@@ -12,6 +12,12 @@ dueDate: 2026-07-15
 
 Morpheus Canvas 是一款结合了 **多维看板 (Kanban)** 与 **关系图谱 (Graph)** 的 Markdown 知识管理工具。
 
+## 开发进度
+- [x] 多维看板多维分组视图
+- [ ] 自研 Canvas 力导向图物理物理学算法
+- [ ] 智能双向链接推荐与计算
+- [x] 兼容 Obsidian 的 ZIP 导入导出
+
 ## 核心组件与依赖
 - 看板视图：[[kanban-board-design|看板视图设计]]
 - 关系图谱：[[relationship-graph-engine|关系图谱引擎]]

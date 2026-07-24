@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Note } from '../utils/markdown';
-import { ZoomIn, ZoomOut, RefreshCw, Maximize2, Link2 } from 'lucide-react';
+import { ZoomIn, ZoomOut, RefreshCw, Maximize2, Link2, LayoutDashboard, Grid } from 'lucide-react';
 
 interface RelationshipGraphProps {
   notes: Record<string, Note>;
@@ -26,6 +26,8 @@ interface Link {
   target: Node;
 }
 
+type GraphLayoutMode = 'force' | 'status-kanban' | 'priority-kanban';
+
 export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
   notes,
   onSelectNote,
@@ -39,6 +41,7 @@ export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [hoveredNode, setHoveredNode] = useState<Node | null>(null);
   const [isDark, setIsDark] = useState<boolean>(false);
+  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>('force');
 
   // 双击手动连线状态
   const [linkingSourceNode, setLinkingSourceNode] = useState<Node | null>(null);
@@ -130,7 +133,7 @@ export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
     linksRef.current = newLinks;
   }, [notes]);
 
-  // 2. 物理模拟循环
+  // 2. 物理模拟与分组排列逻辑
   useEffect(() => {
     let animationFrameId: number;
 
@@ -143,78 +146,158 @@ export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
       const centerX = width / 2;
       const centerY = height / 2;
 
-      // 力导向算法参数
-      const kRepulsion = 1500; // 节点排斥力系数
-      const kAttraction = 0.04; // 连线吸引力系数
-      const kGravity = 0.01; // 向心力系数
-      const damping = 0.85; // 阻尼系数
+      if (layoutMode === 'force') {
+        // --- 力导向模式物理学模拟 ---
+        const kRepulsion = 1500; // 节点排斥力系数
+        const kAttraction = 0.04; // 连线吸引力系数
+        const kGravity = 0.01; // 向心力系数
+        const damping = 0.85; // 阻尼系数
 
-      // 计算排斥力（所有节点对之间）
-      for (let i = 0; i < nodes.length; i++) {
-        const n1 = nodes[i];
-        for (let j = i + 1; j < nodes.length; j++) {
-          const n2 = nodes[j];
-          const dx = n2.x - n1.x;
-          const dy = n2.y - n1.y;
-          const distSq = dx * dx + dy * dy + 0.1;
-          const dist = Math.sqrt(distSq);
+        // 计算排斥力（所有节点对之间）
+        for (let i = 0; i < nodes.length; i++) {
+          const n1 = nodes[i];
+          for (let j = i + 1; j < nodes.length; j++) {
+            const n2 = nodes[j];
+            const dx = n2.x - n1.x;
+            const dy = n2.y - n1.y;
+            const distSq = dx * dx + dy * dy + 0.1;
+            const dist = Math.sqrt(distSq);
 
-          if (dist < 300) {
-            // 排斥力大小与距离平方成反比
-            const force = kRepulsion / distSq;
-            const fx = (dx / dist) * force;
-            const fy = (dy / dist) * force;
+            if (dist < 300) {
+              const force = kRepulsion / distSq;
+              const fx = (dx / dist) * force;
+              const fy = (dy / dist) * force;
 
-            n1.vx -= fx;
-            n1.vy -= fy;
-            n2.vx += fx;
-            n2.vy += fy;
+              n1.vx -= fx;
+              n1.vy -= fy;
+              n2.vx += fx;
+              n2.vy += fy;
+            }
           }
         }
-      }
 
-      // 计算吸引力（连线两端节点之间）
-      links.forEach(link => {
-        const n1 = link.source;
-        const n2 = link.target;
-        const dx = n2.x - n1.x;
-        const dy = n2.y - n1.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+        // 计算吸引力（连线两端节点之间）
+        links.forEach(link => {
+          const n1 = link.source;
+          const n2 = link.target;
+          const dx = n2.x - n1.x;
+          const dy = n2.y - n1.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
 
-        // 吸引力与距离成正比
-        const force = kAttraction * dist;
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
+          const force = kAttraction * dist;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
 
-        n1.vx += fx;
-        n1.vy += fy;
-        n2.vx -= fx;
-        n2.vy -= fy;
-      });
+          n1.vx += fx;
+          n1.vy += fy;
+          n2.vx -= fx;
+          n2.vy -= fy;
+        });
 
-      // 计算向心力（将孤立节点或整个图拉向中心）
-      nodes.forEach(node => {
-        const dx = centerX - node.x;
-        const dy = centerY - node.y;
-        node.vx += dx * kGravity;
-        node.vy += dy * kGravity;
-      });
+        // 计算向心力
+        nodes.forEach(node => {
+          const dx = centerX - node.x;
+          const dy = centerY - node.y;
+          node.vx += dx * kGravity;
+          node.vy += dy * kGravity;
+        });
 
-      // 更新位置（应用速度和阻尼）
-      nodes.forEach(node => {
-        if (node === draggedNodeRef.current) {
-          // 拖拽中的节点位置由鼠标控制，不应用物理模拟
-          return;
+        // 更新位置
+        nodes.forEach(node => {
+          if (node === draggedNodeRef.current) return;
+          node.vx *= damping;
+          node.vy *= damping;
+          node.x += node.vx;
+          node.y += node.vy;
+
+          // 边界限制
+          node.x = Math.max(node.radius, Math.min(width - node.radius, node.x));
+          node.y = Math.max(node.radius, Math.min(height - node.radius, node.y));
+        });
+      } else {
+        // --- 多维看板分列布局 (status-kanban / priority-kanban) ---
+        // 我们将画布划分为若干个垂直的列，节点会受到一个向其目标列中心靠拢的引力，并在列内部作局部的弹簧排斥。
+        let columns: string[] = [];
+        let getGroupKey: (node: Node) => string = () => '';
+
+        if (layoutMode === 'status-kanban') {
+          columns = ['todo', 'in_progress', 'done'];
+          getGroupKey = (node) => node.note.frontmatter.status || 'todo';
+        } else if (layoutMode === 'priority-kanban') {
+          columns = ['high', 'medium', 'low'];
+          getGroupKey = (node) => node.note.frontmatter.priority || 'low';
         }
-        node.vx *= damping;
-        node.vy *= damping;
-        node.x += node.vx;
-        node.y += node.vy;
 
-        // 边界限制
-        node.x = Math.max(node.radius, Math.min(width - node.radius, node.x));
-        node.y = Math.max(node.radius, Math.min(height - node.radius, node.y));
-      });
+        const colCount = columns.length;
+        const colWidth = width / colCount;
+
+        // 给每列内部节点计算向心引力和微弱阻尼，并在同一列节点间应用较强的排斥力，避免重合
+        const kColGravityX = 0.08; // X 轴拉向目标列中心的速度
+        const kColGravityY = 0.02; // Y 轴拉向中心的高度
+        const kRepulsionLocal = 2500;
+        const dampingLocal = 0.75;
+
+        // 1. 同列节点之间的排斥力
+        for (let i = 0; i < nodes.length; i++) {
+          const n1 = nodes[i];
+          const g1 = getGroupKey(n1);
+          for (let j = i + 1; j < nodes.length; j++) {
+            const n2 = nodes[j];
+            const g2 = getGroupKey(n2);
+
+            // 只有当两者在同一列时，才应用排斥力
+            if (g1 === g2) {
+              const dx = n2.x - n1.x;
+              const dy = n2.y - n1.y;
+              const distSq = dx * dx + dy * dy + 0.1;
+              const dist = Math.sqrt(distSq);
+
+              if (dist < 150) {
+                const force = kRepulsionLocal / distSq;
+                const fx = (dx / dist) * force;
+                const fy = (dy / dist) * force;
+
+                n1.vx -= fx;
+                n1.vy -= fy;
+                n2.vx += fx;
+                n2.vy += fy;
+              }
+            }
+          }
+        }
+
+        // 2. 引力和位置更新
+        nodes.forEach(node => {
+          if (node === draggedNodeRef.current) return;
+
+          const groupKey = getGroupKey(node);
+          let colIndex = columns.indexOf(groupKey);
+          if (colIndex === -1) colIndex = colCount - 1; // 兜底最后一列
+
+          // 计算该列的 X 轴中心
+          const targetColCenterX = colIndex * colWidth + colWidth / 2;
+          const targetColCenterY = centerY;
+
+          // 施加列中心引力
+          const dx = targetColCenterX - node.x;
+          const dy = targetColCenterY - node.y;
+
+          node.vx += dx * kColGravityX;
+          node.vy += dy * kColGravityY;
+
+          // 应用阻尼和位移
+          node.vx *= dampingLocal;
+          node.vy *= dampingLocal;
+          node.x += node.vx;
+          node.y += node.vy;
+
+          // 严格限制 X 轴在当前列的边界内，保留少许间挡
+          const minColX = colIndex * colWidth + node.radius + 15;
+          const maxColX = (colIndex + 1) * colWidth - node.radius - 15;
+          node.x = Math.max(minColX, Math.min(maxColX, node.x));
+          node.y = Math.max(node.radius + 15, Math.min(height - node.radius - 40, node.y));
+        });
+      }
 
       // 渲染画布
       draw();
@@ -234,6 +317,45 @@ export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
 
       // 清空画布
       ctx.clearRect(0, 0, width, height);
+
+      // 如果处于分列看板模式，先绘制分列背景线和列标题
+      if (layoutMode !== 'force') {
+        const columns = layoutMode === 'status-kanban' 
+          ? ['Todo', 'In Progress', 'Done'] 
+          : ['High Priority', 'Medium Priority', 'Low Priority'];
+        const colCount = columns.length;
+        const colWidth = width / colCount;
+
+        // 绘制列分割虚线和列背景
+        for (let i = 0; i < colCount; i++) {
+          const colX = i * colWidth;
+          
+          // 列底色略微差异
+          ctx.fillStyle = isDark 
+            ? (i % 2 === 0 ? 'rgba(30, 41, 59, 0.15)' : 'rgba(15, 23, 42, 0.2)')
+            : (i % 2 === 0 ? 'rgba(241, 245, 249, 0.3)' : 'rgba(248, 250, 252, 0.4)');
+          ctx.fillRect(colX, 0, colWidth, height);
+
+          // 列分割线
+          if (i > 0) {
+            ctx.beginPath();
+            ctx.moveTo(colX, 0);
+            ctx.lineTo(colX, height);
+            ctx.strokeStyle = isDark ? 'rgba(51, 65, 85, 0.4)' : 'rgba(226, 232, 240, 0.6)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]); // 还原
+          }
+
+          // 列标题 (固定在顶部，不随 pan/zoom 偏移)
+          ctx.fillStyle = isDark ? '#94a3b8' : '#64748b';
+          ctx.font = 'bold 12px system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(columns[i].toUpperCase(), colX + colWidth / 2, 20);
+        }
+      }
 
       ctx.save();
       // 应用平移和缩放
@@ -356,7 +478,7 @@ export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
     return () => {
       cancelAnimationFrame(animationFrameId);
     };
-  }, [zoom, pan, hoveredNode, selectedNoteId, isDark, linkingSourceNode, mouseWorldPos]);
+  }, [zoom, pan, hoveredNode, selectedNoteId, isDark, linkingSourceNode, mouseWorldPos, layoutMode]);
 
   // 4. 窗口大小改变时调整 Canvas 分辨率
   useEffect(() => {
@@ -594,6 +716,46 @@ export const RelationshipGraph: React.FC<RelationshipGraphProps> = ({
           正在从《{linkingSourceNode.label}》拉出链接线，请点击另一个目标节点完成双链建立...
         </div>
       )}
+
+      {/* 右上角多维布局切换器 */}
+      <div className="absolute top-6 right-6 z-10 flex items-center bg-white dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-800 shadow-md">
+        <button
+          onClick={() => setLayoutMode('force')}
+          className={`flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150 ${
+            layoutMode === 'force'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+          }`}
+          title="经典力导向网络布局"
+        >
+          <Grid size={13} />
+          <span>自由网状</span>
+        </button>
+        <button
+          onClick={() => setLayoutMode('status-kanban')}
+          className={`flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150 ${
+            layoutMode === 'status-kanban'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+          }`}
+          title="按 status 属性垂直分列布局，保留连线"
+        >
+          <LayoutDashboard size={13} />
+          <span>状态分列</span>
+        </button>
+        <button
+          onClick={() => setLayoutMode('priority-kanban')}
+          className={`flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150 ${
+            layoutMode === 'priority-kanban'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+          }`}
+          title="按 priority 属性垂直分列布局，保留连线"
+        >
+          <LayoutDashboard size={13} />
+          <span>优先级分列</span>
+        </button>
+      </div>
 
       {/* 右下角悬浮控制按钮 */}
       <div className="absolute bottom-6 right-6 z-10 flex flex-col gap-2 bg-white dark:bg-slate-900 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-lg">

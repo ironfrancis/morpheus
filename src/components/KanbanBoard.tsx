@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Note } from '../utils/markdown';
+import { Note, parseChecklist, toggleChecklistItem } from '../utils/markdown';
 import { Calendar, Tag, Plus, Edit2, Link2 } from 'lucide-react';
 
 interface KanbanBoardProps {
@@ -251,8 +251,65 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
                     {/* 卡片摘要/正文片段 */}
                     <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 mb-3">
-                      {note.content.replace(/[#*`[\]]/g, '').slice(0, 100) || '无内容...'}
+                      {note.content.replace(/[#*`[\]]/g, '').replace(/-\s*\[[ xX]\][^\n]*/g, '').trim().slice(0, 100) || '无内容...'}
                     </p>
+
+                    {/* Checklist 任务进度条 */}
+                    {(() => {
+                      const checklist = parseChecklist(note.content);
+                      if (checklist.length === 0) return null;
+                      
+                      const totalTasks = checklist.length;
+                      const completedTasks = checklist.filter(item => item.checked).length;
+                      const progressPercentage = Math.round((completedTasks / totalTasks) * 100);
+
+                      return (
+                        <div className="mb-3 space-y-2 p-2 bg-slate-50/50 dark:bg-slate-900/30 rounded-lg border border-slate-100 dark:border-slate-900/30" onClick={(e) => e.stopPropagation()}>
+                          {/* 进度条头部 */}
+                          <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400">
+                            <span className="font-medium flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
+                              子任务 ({completedTasks}/{totalTasks})
+                            </span>
+                            <span className="font-semibold">{progressPercentage}%</span>
+                          </div>
+                          {/* 进度条槽 */}
+                          <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-800/80 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-indigo-500 dark:bg-indigo-400 rounded-full transition-all duration-300"
+                              style={{ width: `${progressPercentage}%` }}
+                            ></div>
+                          </div>
+                          {/* Checklist 选项列表 (最多展示前 3 项) */}
+                          <div className="space-y-1.5 pt-1">
+                            {checklist.slice(0, 3).map(item => (
+                              <label 
+                                key={item.lineIndex}
+                                className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer select-none hover:text-slate-900 dark:hover:text-slate-100"
+                              >
+                                <input 
+                                  type="checkbox"
+                                  checked={item.checked}
+                                  onChange={() => {
+                                    const updatedContent = toggleChecklistItem(note.content, item.lineIndex);
+                                    onUpdateNote(note.id, { content: updatedContent });
+                                  }}
+                                  className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-0 transition-colors cursor-pointer"
+                                />
+                                <span className={`line-clamp-1 transition-all text-[11px] ${item.checked ? 'line-through text-slate-400 dark:text-slate-500' : ''}`}>
+                                  {item.text}
+                                </span>
+                              </label>
+                            ))}
+                            {totalTasks > 3 && (
+                              <div className="text-[9px] text-slate-400 dark:text-slate-500 pl-5">
+                                还有 {totalTasks - 3} 个子任务...
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* 卡片底部元数据 */}
                     <div className="flex flex-wrap items-center gap-2 mt-auto pt-2 border-t border-slate-100 dark:border-slate-900/60 text-[10px] text-slate-500 dark:text-slate-400">

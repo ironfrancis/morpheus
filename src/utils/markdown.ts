@@ -182,3 +182,44 @@ export function updateNoteFrontmatter(note: Note, newFrontmatter: Partial<NoteFr
     links: parsed.links,
   };
 }
+
+export interface ChecklistItem {
+  lineIndex: number;
+  text: string;
+  checked: boolean;
+}
+
+/**
+ * 从 Markdown 文本中提取所有的 Checklist 项
+ */
+export function parseChecklist(content: string): ChecklistItem[] {
+  const items: ChecklistItem[] = [];
+  const lines = content.split('\n');
+  lines.forEach((line, lineIndex) => {
+    const match = line.match(/^(\s*)-\s*\[([ xX])\]\s+(.+)$/);
+    if (match) {
+      items.push({
+        lineIndex,
+        text: match[3].trim(),
+        checked: match[2].toLowerCase() === 'x'
+      });
+    }
+  });
+  return items;
+}
+
+/**
+ * 切换指定行的 Checklist 勾选状态并返回更新后的全文
+ */
+export function toggleChecklistItem(content: string, lineIndex: number): string {
+  const lines = content.split('\n');
+  const line = lines[lineIndex];
+  if (line !== undefined) {
+    const match = line.match(/^(\s*-\s*\[)([ xX])(\]\s+.+)$/);
+    if (match) {
+      const nextChar = match[2].toLowerCase() === 'x' ? ' ' : 'x';
+      lines[lineIndex] = `${match[1]}${nextChar}${match[3]}`;
+    }
+  }
+  return lines.join('\n');
+}
